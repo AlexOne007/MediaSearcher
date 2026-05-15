@@ -1,5 +1,5 @@
+#include <atomic>
 #include <charconv>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -9,14 +9,16 @@
 #include <utility>
 
 #include "crow.h"
-
 #include "naive-file-filter.hpp"
 
 void printHelp() {
   const auto* help =
-      "Usage: <program> <seconds> [<directory>]\n"
+      "Usage: <program> <seconds> [<directory> [http|file [config_file]]]\n"
       "\t<seconds> - update interval in seconds;\n"
-      "\t<directory> - directory to traverse, default value is $HOME.\n";
+      "\t<directory> - directory to traverse, default value is $HOME.\n"
+      "\thttp|file - output mode (http or file), default file\n"
+      "\tconfig_file - file with extensions to treat as media\n"
+      "After startup, enter 'exit' to stop the program.\n";
   std::cout << help;
 }
 
@@ -26,7 +28,7 @@ void writeResult(std::ostream& output, MediaFiles files) {
   static_assert(media_file_types.size() == files.size());
   for (auto i = 0; i < files.size(); i++) {
     output << std::quoted(media_file_types[i]) << ": [ ";
-    for (std::size_t j = 0; j < files[i].size(); j++) {
+    for (auto j = 0; j < files[i].size(); j++) {
       output << std::quoted(files[i][j]);
       if (j != files[i].size() - 1) {
         output << ", ";
@@ -40,15 +42,16 @@ void writeResult(std::ostream& output, MediaFiles files) {
   output << " }\n";
 }
 
-void writeResultInFile(std::filesystem::path directory, MediaFiles files) {
-  const auto* result_filename = ".media_files";
-  std::ofstream result_file(directory.append(result_filename),
+void writeResultInFile(const std::filesystem::path& directory,
+                       MediaFiles files) {
+  const char* result_filename = ".media_files";
+  std::ofstream result_file(directory / result_filename,
                             std::ios_base::out | std::ios_base::trunc);
   writeResult(result_file, std::move(files));
 }
 
 class ResultStorage {
-public:
+ public:
   static std::string getResultStr() {
     std::lock_guard lock{m_};
     return result_;
@@ -59,7 +62,7 @@ public:
     result_ = std::move(new_result);
   }
 
-private:
+ private:
   static inline std::string result_{};
   static inline std::mutex m_{};
 };
@@ -71,8 +74,9 @@ void writeResultInStorage(MediaFiles files) {
 }
 
 void startTraversing(const int seconds, const std::filesystem::path& directory,
-                     FileFilter* filter, bool http) {
-  while (true) {
+                     FileFilter* filter, bool http,
+                     std::atomic<bool>& stop_flag) {
+  while (!stop_flag.load()) {
     MediaFiles files;
     for (std::filesystem::recursive_directory_iterator iter(
              directory,
@@ -94,30 +98,36 @@ void startTraversing(const int seconds, const std::filesystem::path& directory,
     } else {
       writeResultInFile(directory, files);
     }
-    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+
+    for (int i = 0; i < seconds && !stop_flag.load(); i++) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
   }
 }
 
 int main(const int argc, char const* argv[]) {
   if (argc < 2 || argc > 5) {
     printHelp();
+    return 0;
   }
+
   bool http = false;
   int seconds = 0;
   {
-    const auto* seconds_str = argv[1];
-    const auto seconds_str_end = seconds_str + std::strlen(seconds_str);
+    const char* seconds_str = argv[1];
+    const char* seconds_str_end = seconds_str + std::strlen(seconds_str);
     const auto result = std::from_chars(seconds_str, seconds_str_end, seconds);
     if (result.ptr != seconds_str_end) {
       std::cerr << "Wrong arguments\n";
       return 2;
     }
   }
+
   std::filesystem::path directory;
   if (argc < 3) {
-    const auto* home_path = std::getenv("HOME");
+    const char* home_path = std::getenv("HOME");
     if (home_path == nullptr) {
-      std::cerr << "Unable to read $HOME";
+      std::cerr << "Unable to read $HOME\n";
       return 1;
     }
     directory = home_path;
@@ -128,21 +138,17 @@ int main(const int argc, char const* argv[]) {
   if (argc >= 4) {
     if (std::string_view(argv[3]) == "http") {
       http = true;
-      std::jthread thread([]() {
+      std::jthread http_thread([]() {
         crow::SimpleApp app;
-
-      CROW_ROUTE(app, "/media_files")
-      ([](){
+        CROW_ROUTE(app, "/media_files")([]() {
           const std::string response = ResultStorage::getResultStr();
           crow::response res(200, response);
           res.set_header("Content-Type", "application/json");
-
           return res;
+        });
+        app.port(1234).run();
       });
-
-      app.port(1234).run();
-      });
-      thread.detach();
+      http_thread.detach();
     } else if (std::string_view(argv[3]) == "file") {
       http = false;
     } else {
@@ -155,6 +161,20 @@ int main(const int argc, char const* argv[]) {
   if (argc >= 5) {
     file_filter = NaiveFileFilter(NaiveFileFilter::loadFromConfig(argv[4]));
   }
-  startTraversing(seconds, directory, &file_filter, http);
+
+  std::atomic<bool> stop_flag{false};
+  std::jthread worker([&] {
+    startTraversing(seconds, directory, &file_filter, http, stop_flag);
+  });
+
+  std::string command;
+  while (true) {
+    std::cin >> command;
+    if (command == "exit") {
+      stop_flag.store(true);
+      break;
+    }
+  }
+
   return 0;
 }
