@@ -15,9 +15,9 @@ void printHelp() {
   const auto* help =
       "Usage: <program> <seconds> [<directory> [http|file [config_file]]]\n"
       "\t<seconds> - update interval in seconds;\n"
-      "\t<directory> - directory to traverse, default value is $HOME.\n"
-      "\thttp|file - output mode (http or file), default file\n"
-      "\tconfig_file - file with extensions to treat as media\n"
+      "\t<directory> - directory to traverse, default value is $HOME;\n"
+      "\thttp|file - output mode (http or file), default file;\n"
+      "\tconfig_file - file with extensions to treat as media;\n"
       "After startup, enter 'exit' to stop the program.\n";
   std::cout << help;
 }
